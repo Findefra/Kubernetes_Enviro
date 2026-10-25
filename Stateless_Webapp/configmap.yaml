@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webapp-html
+  labels:
+    app: webapp
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Kubernetes Stateless WebApp POC</title>
+      <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 4rem auto; padding: 0 1rem; }
+        h1 { color: #326ce5; }
+        .badge { background: #326ce5; color: white; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.875rem; }
+      </style>
+    </head>
+    <body>
+      <h1>Stateless Web Application</h1>
+      <p><span class="badge">Kubernetes POC #01</span></p>
+      <p>This page is served from an nginx container managed by a Deployment.</p>
+      <ul>
+        <li>3 replicas with RollingUpdate strategy</li>
+        <li>ConfigMap-mounted static content</li>
+        <li>Resource requests &amp; limits</li>
+        <li>Liveness + Readiness probes</li>
+      </ul>
+      <p>Hostname: <code>$(hostname)</code></p>
+    </body>
+    </html>
