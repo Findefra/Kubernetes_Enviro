@@ -1,0 +1,74 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+  labels:
+    app: backup
+spec:
+  # Every day at 02:00 UTC
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid          # skip if previous run still active
+  successfulJobsHistoryLimit: 4
+  failedJobsHistoryLimit: 1
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: backup
+            image: busybox:1.36
+            command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Starting backup at $(date)"
+              # Simulate backup work
+              sleep 10
+              echo "Backup completed successfully"
+              echo "Would normally: pg_dump / mysqldump / restic / velero ..."
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "32Mi"
+              limits:
+                cpu: "200m"
+                memory: "64Mi"
+---
+# Example one-off Job (e.g. database migration)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migration
+  labels:
+    app: migration
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: migration
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: migrate
+        image: busybox:1.36
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Running schema migration..."
+          sleep 5
+          echo "Migration finished"
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "32Mi"
+          limits:
+            cpu: "200m"
+            memory: "64Mi"
