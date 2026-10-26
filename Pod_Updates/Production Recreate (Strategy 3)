@@ -1,0 +1,125 @@
+#!/bin/bash
+# production-recreate.sh
+# Strategy: Recreate
+# WARNING: Causes full downtime. Both versions never run at the same time.
+# Use only when: Dual-version is not possible or downtime is acceptable.
+
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-production}"
+APP_NAME="${APP_NAME:-batch-processor}"
+IMAGE="${IMAGE:-your-registry.com/batch-processor:v1.8.0}"
+REPLICAS="${REPLICAS:-3}"
+
+echo "========================================================"
+echo "  WARNING: RECREATE STRATEGY = FULL DOWNTIME"
+echo "  All pods of the old version are terminated before"
+echo "  any new pods are created."
+echo "========================================================"
+echo ""
+echo "App: $APP_NAME | Namespace: $NAMESPACE | Image: $IMAGE"
+echo ""
+
+read -p "Type 'YES' to continue with Recreate strategy: " confirm
+if [[ "$confirm" != "YES" ]]; then
+  echo "Aborted."
+  exit 1
+fi
+
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+  annotations:
+    kubernetes.io/change-cause: "Recreate deployment to ${IMAGE}"
+spec:
+  replicas: ${REPLICAS}
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 300
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+    spec:
+      serviceAccountName: ${APP_NAME}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: ${APP_NAME}
+        image: ${IMAGE}
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        startupProbe:
+          httpGet:
+            path: /healthz/startup
+            port: 8080
+          failureThreshold: 20
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /healthz/ready
+            port: 8080
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz/live
+            port: 8080
+          periodSeconds: 10
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+EOF
+
+echo ""
+echo "✅ Recreate deployment applied"
+echo ""
+echo "Trigger update (this will cause downtime):"
+echo "  kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE} -n ${NAMESPACE}"
+echo ""
+echo "Watch:"
+echo "  kubectl rollout status deployment/${APP_NAME} -n ${NAMESPACE} --watch"
+echo "  kubectl get pods -l app=${APP_NAME} -n ${NAMESPACE} -w"
