@@ -1,0 +1,178 @@
+#!/bin/bash
+# production-blue-green.sh
+# Strategy: Blue/Green
+# Use when: You want full isolation of the new version + instant traffic switch + instant rollback
+# Cost: ~2x resources during the window. Worth it for critical services.
+
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-production}"
+APP_NAME="${APP_NAME:-checkout-service}"
+BLUE_IMAGE="${BLUE_IMAGE:-your-registry.com/checkout:v3.1.0}"
+GREEN_IMAGE="${GREEN_IMAGE:-your-registry.com/checkout:v3.2.0}"
+REPLICAS="${REPLICAS:-4}"
+
+echo "=== Production Blue/Green ==="
+echo "App: $APP_NAME | Namespace: $NAMESPACE"
+echo "Blue (live):  $BLUE_IMAGE"
+echo "Green (new):  $GREEN_IMAGE"
+echo ""
+
+# Shared labels & security context pattern
+COMMON_SPEC=$(cat <<EOF
+      serviceAccountName: ${APP_NAME}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: ${APP_NAME}
+      containers:
+      - name: ${APP_NAME}
+        image: PLACEHOLDER_IMAGE
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            cpu: "300m"
+            memory: "640Mi"
+          limits:
+            cpu: "1500m"
+            memory: "1.5Gi"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        startupProbe:
+          httpGet:
+            path: /healthz/startup
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /healthz/ready
+            port: 8080
+          periodSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz/live
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 3
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+EOF
+)
+
+# Blue
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-blue
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    version: blue
+spec:
+  replicas: ${REPLICAS}
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: blue
+    spec:
+$(echo "$COMMON_SPEC" | sed "s|PLACEHOLDER_IMAGE|${BLUE_IMAGE}|")
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-green
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    version: green
+spec:
+  replicas: ${REPLICAS}
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 600
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      version: green
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: green
+    spec:
+$(echo "$COMMON_SPEC" | sed "s|PLACEHOLDER_IMAGE|${GREEN_IMAGE}|")
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+spec:
+  selector:
+    app: ${APP_NAME}
+    version: blue          # starts on Blue
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  minAvailable: 75%
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+EOF
+
+echo ""
+echo "✅ Blue + Green deployments + Service + PDB applied"
+echo ""
+echo "=== Operational Runbook ==="
+echo ""
+echo "1. Validate Green is healthy:"
+echo "   kubectl rollout status deployment/${APP_NAME}-green -n ${NAMESPACE}"
+echo "   kubectl get pods -l app=${APP_NAME},version=green -n ${NAMESPACE}"
+echo ""
+echo "2. Switch traffic to Green (instant):"
+echo "   kubectl patch svc ${APP_NAME} -n ${NAMESPACE} -p '{\"spec\":{\"selector\":{\"app\":\"${APP_NAME}\",\"version\":\"green\"}}}'"
+echo ""
+echo "3. Instant rollback to Blue if needed:"
+echo "   kubectl patch svc ${APP_NAME} -n ${NAMESPACE} -p '{\"spec\":{\"selector\":{\"app\":\"${APP_NAME}\",\"version\":\"blue\"}}}'"
+echo ""
+echo "4. After soak period, scale down the old color:"
+echo "   kubectl scale deployment/${APP_NAME}-blue --replicas=0 -n ${NAMESPACE}"
