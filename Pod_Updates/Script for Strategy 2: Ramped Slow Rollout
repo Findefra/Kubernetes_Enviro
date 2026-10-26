@@ -1,0 +1,102 @@
+#!/bin/bash
+# File: ramped-slow-rollout.sh
+# Strategy 2: Ramped Slow Rollout
+# maxSurge: 1 | maxUnavailable: 1  → pods change one at a time
+
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-default}"
+APP_NAME="demo-app"
+IMAGE_V1="nginx:1.25"
+IMAGE_V2="nginx:1.26"
+
+echo "=== Strategy 2: Ramped Slow Rollout ==="
+echo "Namespace: $NAMESPACE"
+echo ""
+
+# Create the Deployment with ramped strategy
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-ramped
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    strategy: ramped
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1          # only 1 extra pod allowed
+      maxUnavailable: 1    # only 1 pod can be unavailable
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      strategy: ramped
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        strategy: ramped
+        version: v1
+    spec:
+      containers:
+      - name: nginx
+        image: ${IMAGE_V1}
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}-ramped
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+    strategy: ramped
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP
+EOF
+
+echo "✅ Ramped Slow Rollout deployment created: ${APP_NAME}-ramped"
+echo "   → maxSurge: 1 | maxUnavailable: 1"
+echo ""
+
+cat <<EOF
+
+============================================
+HOW TO USE
+============================================
+
+# Trigger the slow rollout (change image)
+kubectl set image deployment/${APP_NAME}-ramped nginx=${IMAGE_V2} -n ${NAMESPACE}
+
+# Watch progress (pods change one by one)
+kubectl rollout status deployment/${APP_NAME}-ramped -n ${NAMESPACE} --watch
+
+# Check current pods
+kubectl get pods -l app=${APP_NAME},strategy=ramped -n ${NAMESPACE} -o wide
+
+# Rollback if needed
+kubectl rollout undo deployment/${APP_NAME}-ramped -n ${NAMESPACE}
+
+# Cleanup
+# kubectl delete deployment,svc ${APP_NAME}-ramped -n ${NAMESPACE}
+EOF
