@@ -1,0 +1,170 @@
+#!/bin/bash
+# File: k8s-native-rollout-strategies.sh
+# Demonstrates the three built-in Kubernetes deployment strategies
+
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-default}"
+APP_NAME="demo-app"
+IMAGE_V1="nginx:1.25"
+IMAGE_V2="nginx:1.26"
+
+echo "=== Kubernetes Native Deployment Strategies ==="
+echo "Namespace: $NAMESPACE"
+echo ""
+
+# --------------------------------------------------
+# 1. Rolling Update (default + custom maxSurge/maxUnavailable)
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-rolling
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    strategy: rolling
+spec:
+  replicas: 6
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%          # can create 25% extra pods
+      maxUnavailable: 25%    # can take down 25% of pods
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      strategy: rolling
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        strategy: rolling
+        version: v1
+    spec:
+      containers:
+      - name: nginx
+        image: ${IMAGE_V1}
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+EOF
+
+echo "✅ 1. Rolling Update deployment created (${APP_NAME}-rolling)"
+echo "   → maxSurge: 25% | maxUnavailable: 25%"
+echo ""
+
+# --------------------------------------------------
+# 2. Ramped Slow Rollout (one pod at a time)
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-ramped
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    strategy: ramped
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1      # change only one pod at a time
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      strategy: ramped
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        strategy: ramped
+        version: v1
+    spec:
+      containers:
+      - name: nginx
+        image: ${IMAGE_V1}
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+EOF
+
+echo "✅ 2. Ramped Slow Rollout deployment created (${APP_NAME}-ramped)"
+echo "   → maxSurge: 1 | maxUnavailable: 1  (one-by-one)"
+echo ""
+
+# --------------------------------------------------
+# 3. Recreate strategy
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-recreate
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    strategy: recreate
+spec:
+  replicas: 3
+  strategy:
+    type: Recreate                 # kill all old pods first
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      strategy: recreate
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        strategy: recreate
+        version: v1
+    spec:
+      containers:
+      - name: nginx
+        image: ${IMAGE_V1}
+        ports:
+        - containerPort: 80
+EOF
+
+echo "✅ 3. Recreate deployment created (${APP_NAME}-recreate)"
+echo "   → All v1 pods are terminated before any v2 pods start"
+echo ""
+
+# --------------------------------------------------
+# Helper: how to trigger an update
+# --------------------------------------------------
+cat <<'EOF'
+
+============================================
+HOW TO TRIGGER AN UPDATE
+============================================
+
+# Rolling / Ramped (just change the image)
+kubectl set image deployment/demo-app-rolling nginx=nginx:1.26 -n $NAMESPACE
+kubectl set image deployment/demo-app-ramped  nginx=nginx:1.26 -n $NAMESPACE
+
+# Watch the progress
+kubectl rollout status deployment/demo-app-rolling -n $NAMESPACE
+kubectl rollout status deployment/demo-app-ramped  -n $NAMESPACE
+
+# Recreate strategy
+kubectl set image deployment/demo-app-recreate nginx=nginx:1.26 -n $NAMESPACE
+
+# Rollback if needed
+kubectl rollout undo deployment/demo-app-rolling -n $NAMESPACE
+EOF
