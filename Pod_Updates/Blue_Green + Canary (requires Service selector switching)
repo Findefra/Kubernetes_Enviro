@@ -1,0 +1,178 @@
+#!/bin/bash
+# File: k8s-bluegreen-canary.sh
+# Demonstrates Blue/Green and a simple Canary using native Kubernetes
+# (for true weighted Canary / A/B / Shadow you still need a service mesh)
+
+set -euo pipefail
+
+NAMESPACE="${NAMESPACE:-default}"
+APP_NAME="demo-app"
+IMAGE_BLUE="nginx:1.25"
+IMAGE_GREEN="nginx:1.26"
+
+echo "=== Blue/Green + Simple Canary Strategies ==="
+echo "Namespace: $NAMESPACE"
+echo ""
+
+# --------------------------------------------------
+# Shared Service (points to whichever version we want)
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+    version: blue          # initially points to Blue
+  ports:
+  - port: 80
+    targetPort: 80
+  type: ClusterIP
+EOF
+
+echo "✅ Service created (currently selecting version=blue)"
+echo ""
+
+# --------------------------------------------------
+# 4. Blue Deployment (current live version)
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-blue
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    version: blue
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: blue
+    spec:
+      containers:
+      - name: nginx
+        image: ${IMAGE_BLUE}
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 3
+          periodSeconds: 5
+EOF
+
+echo "✅ Blue environment created (${APP_NAME}-blue)"
+echo ""
+
+# --------------------------------------------------
+# Green Deployment (new version – kept scaled down or ready)
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}-green
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    version: green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+      version: green
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: green
+    spec:
+      containers:
+      - name: nginx
+        image: ${IMAGE_GREEN}
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 3
+          periodSeconds: 5
+EOF
+
+echo "✅ Green environment created (${APP_NAME}-green)"
+echo ""
+
+# --------------------------------------------------
+# Simple Canary: temporary second Service + optional Ingress/weight
+# --------------------------------------------------
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}-canary
+  namespace: ${NAMESPACE}
+spec:
+  selector:
+    app: ${APP_NAME}
+    version: green
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+
+echo "✅ Canary Service created (${APP_NAME}-canary → green)"
+echo ""
+
+# --------------------------------------------------
+# Helper commands
+# --------------------------------------------------
+cat <<'EOF'
+
+============================================
+BLUE / GREEN SWITCH
+============================================
+
+# 1. Make sure Green is healthy
+kubectl get pods -l version=green -n $NAMESPACE
+kubectl rollout status deployment/demo-app-green -n $NAMESPACE
+
+# 2. Instant switch (change Service selector)
+kubectl patch service demo-app -n $NAMESPACE -p '{"spec":{"selector":{"version":"green"}}}'
+
+# 3. Instant rollback
+kubectl patch service demo-app -n $NAMESPACE -p '{"spec":{"selector":{"version":"blue"}}}'
+
+
+============================================
+SIMPLE CANARY (manual)
+============================================
+
+# Option A – send a small % of traffic via a second Service / Ingress
+# (you can point an Ingress or another client to demo-app-canary)
+
+# Option B – scale Green down for a true canary
+kubectl scale deployment demo-app-green --replicas=1 -n $NAMESPACE
+# then gradually increase:
+# kubectl scale deployment demo-app-green --replicas=2 ...
+# finally switch the main Service when ready
+
+
+============================================
+CLEANUP
+============================================
+# kubectl delete deployment,svc -l app=demo-app -n $NAMESPACE
+EOF
